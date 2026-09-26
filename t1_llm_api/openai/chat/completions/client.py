@@ -29,12 +29,14 @@ class OpenAIClient(BaseOpenAIClient):
             system_prompt (str): The system message to guide the model's behavior.
             api_key (str): The OpenAI API key for authentication.
         """
-        #TODO:
-        # https://github.com/openai/openai-python?tab=readme-ov-file#usage
-        # 1. Call to __init__ of super class
-        # 2. Initialize OpenAI client: `self._client = OpenAI(api_key=api_key)`
-        # 3. Initialize AsyncOpenAI client: `self._async_client = AsyncOpenAI(api_key=api_key)`
-        raise NotImplementedError
+        super().__init__(endpoint, model_name, system_prompt, api_key)
+
+        url, query = endpoint.split("?", 1)
+        default_query = dict(param.split("=", 1) for param in query.split("&"))
+        base_url = url.removesuffix("/chat/completions")
+
+        self._client = OpenAI(api_key=api_key, base_url=base_url, default_query=default_query)
+        self._async_client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_query=default_query)
 
     def response(self, messages: list[Message], **kwargs) -> Message:
         """
@@ -51,19 +53,14 @@ class OpenAIClient(BaseOpenAIClient):
             The system prompt is automatically prepended to the messages.
             The response is printed to stdout before being returned.
         """
-        #TODO:
-        # https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
-        # 0. Make a request in Postman to see the request and response
-        # 1. Prepare messages list with system message first:
-        #   - create messages_dicts list: [{"role": "system", "content": self._system_prompt}, *[message.to_dict() for message in messages]]
-        # 2. Create completion using OpenAI client:
-        #   - call `self._client.chat.completions.create()` with:
-        #     - model=self._model_name
-        #     - messages=messages_dicts
-        # 3. Extract content from response: `content = response.choices[0].message.content`
-        # 4. Print content
-        # 5. Return ASSISTANT message
-        raise NotImplementedError
+        messages_dicts = [{"role": "system", "content": self._system_prompt}, *[message.to_dict() for message in messages]]
+
+        response = self._client.chat.completions.create(model=self._model_name, messages=messages_dicts)
+        
+        content = response.choices[0].message.content
+        print(content)
+        
+        return Message(role=Role.ASSISTANT, content=content)
 
     async def stream_response(self, messages: list[Message], **kwargs) -> Message:
         """
@@ -83,22 +80,18 @@ class OpenAIClient(BaseOpenAIClient):
             The system prompt is automatically prepended to the messages.
             Each token is printed to stdout as it arrives for real-time display.
         """
-        #TODO:
-        # https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
-        # 0. Make a request in Postman to see the request and response
-        # 1. Prepare messages list with system message first:
-        #   - create messages_dicts list: [{"role": "system", "content": self._system_prompt}, *[message.to_dict() for message in messages]]
-        # 2. Initialize empty content list to collect streamed chunks
-        # 3. Create streaming completion using AsyncOpenAI client:
-        #   - call `await self._async_client.chat.completions.create()` with:
-        #     - model=self._model_name
-        #     - stream=True
-        #     - messages=messages_dicts
-        # 4. Iterate through stream chunks using `async for chunk in stream:`
-        # 5. For each chunk, check if delta content exists using walrus operator:
-        #   - `if delta_content := chunk.choices[0].delta.content:`
-        #   - append delta_content to content list
-        #   - print delta_content without newline (end='')
-        # 6. Print empty line (for formatting)
-        # 7. Return ASSISTANT message with joined content: `Message(role=Role.ASSISTANT, content="".join(content))`
-        raise NotImplementedError
+        messages_dicts = [{"role": "system", "content": self._system_prompt}, *[message.to_dict() for message in messages]]
+
+        content = []
+
+        stream = await self._async_client.chat.completions.create(model=self._model_name, messages=messages_dicts, stream=True)
+
+        async for chunk in stream:
+            if delta_content := chunk.choices[0].delta.content:
+                content.append(delta_content)
+                print(delta_content, end='')
+
+        print()
+        
+        return Message(role=Role.ASSISTANT, content="".join(content))
+        

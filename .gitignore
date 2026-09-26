@@ -1,0 +1,10 @@
+# Local IDE (PyCharm / IntelliJ)
+.idea/
+
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
