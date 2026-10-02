@@ -1,7 +1,8 @@
-import base64
 from datetime import datetime
 
-from commons.constants import OPENAI_HOST
+import requests
+
+from commons.constants import OPENAI_API_KEY, OPENAI_HOST
 from t3_content_generation._openai_client import OpenAIClientT3
 
 
@@ -35,12 +36,38 @@ def main(model_name: str, request: str):
     # 4. Decode it with base64.b64decode and assign to `image_bytes` variable
     # 5. Create filename as `f"{datetime.now()}.png"` ({current datetime}.png)
     # 6. open filename (wb) and write `image_bytes`
-    raise NotImplementedError
+    client = OpenAIClientT3(f"{OPENAI_HOST}/openai/deployments/gpt-image-1.5-2025-12-16/chat/completions")
+
+    response = client.call(
+        model=model_name,
+        messages=[
+            {
+            "role": "user",
+            "content": request}
+        ],
+    )
+
+    image_url = response["choices"][0]["message"]["custom_content"]["attachments"][0]["url"]
+    image_response = requests.get(
+        f"{OPENAI_HOST}/v1/{image_url}",
+        headers={
+            "Api-Key": OPENAI_API_KEY,
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+        },
+    )
+    if image_response.status_code != 200:
+        raise Exception(f"HTTP {image_response.status_code}: {image_response.text}")
+
+    filename = f"{datetime.now()}.png".replace(":", "-")
+    with open(filename, "wb") as image_file:
+        image_file.write(image_response.content)
 
 
 main(
     #TODO:
     # - model_name gpt-image-2
     # - request="Smiling catdog"
+    model_name="gpt-image-1.5",
+    request="Smiling catdog"
 )
 

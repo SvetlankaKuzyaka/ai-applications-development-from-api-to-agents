@@ -4,6 +4,7 @@ from datetime import datetime
 import requests
 
 from commons.constants import OPENAI_API_KEY, OPENAI_HOST
+from t3_content_generation._openai_client import OpenAIClientT3
 
 
 # https://developers.openai.com/api/reference/resources/images/methods/edit
@@ -43,7 +44,45 @@ def main(model_name: str, image_path: str, prompt: str, **kwargs):
     # 6. Decode `image_base64` with base64.b64decode and assign to `image_bytes`
     # 7. Create filename as f"edited_{datetime.now()}.png"
     # 8. Open filename (wb) and write `image_bytes`
-    raise NotImplementedError
+    client = OpenAIClientT3(f"{OPENAI_HOST}/openai/deployments/gpt-image-1.5-2025-12-16/chat/completions")
+
+    with open(image_path, "rb") as image_file:
+        image_base64 = base64.b64encode(image_file.read()).decode("utf-8")
+
+    response = client.call(
+        model=model_name,
+        messages=[
+            {
+                "role": "user",
+                "content": prompt,
+                "custom_content": {
+                    "attachments": [
+                        {
+                            "type": "image/png",
+                            "title": "Image",
+                            "data": image_base64,
+                        }
+                    ]
+                },
+            }
+        ],
+        **kwargs,
+    )
+
+    image_url = response["choices"][0]["message"]["custom_content"]["attachments"][0]["url"]
+    image_response = requests.get(
+        f"{OPENAI_HOST}/v1/{image_url}",
+        headers={
+            "Api-Key": OPENAI_API_KEY,
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+        },
+    )
+    if image_response.status_code != 200:
+        raise Exception(f"HTTP {image_response.status_code}: {image_response.text}")
+
+    filename = f"edited_{datetime.now()}.png".replace(":", "-")
+    with open(filename, "wb") as image_file:
+        image_file.write(image_response.content)
 
 
 main(
@@ -51,4 +90,7 @@ main(
     # - model_name="gpt-image-2"
     # - image_path="logo.png"
     # - prompt: describe how to edit the image (e.g. add sparkles/aura, keep text readable)
+    model_name="gpt-image-1.5",
+    image_path="logo.png",
+    prompt="Add magical sparkles and glowing aura around the logo",
 )
