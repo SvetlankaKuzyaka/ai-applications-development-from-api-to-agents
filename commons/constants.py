@@ -22,7 +22,8 @@ OPENAI_HOST = "https://ai-proxy.lab.epam.com"
 # OPENAI_CHAT_COMPLETIONS_ENDPOINT = f"{OPENAI_HOST}/v1/chat/completions"
 OPENAI_CHAT_COMPLETIONS_ENDPOINT = f"{OPENAI_HOST}/openai/deployments/gpt-4.1-mini-2025-04-14/chat/completions?api-version=2024-02-15-preview"
 OPENAI_RESPONSES_ENDPOINT = f"{OPENAI_HOST}/v1/responses"
-OPENAI_EMBEDDINGS_ENDPOINT = f"{OPENAI_HOST}/v1/embeddings"
+# OPENAI_EMBEDDINGS_ENDPOINT = f"{OPENAI_HOST}/v1/embeddings"
+OPENAI_EMBEDDINGS_ENDPOINT = f"{OPENAI_HOST}/openai/deployments/text-embedding-ada-002/embeddings?api-version=2023-12-01-preview"
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 
 # Anthropic API configuration
