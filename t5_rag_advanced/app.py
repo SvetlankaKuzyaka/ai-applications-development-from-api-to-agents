@@ -32,9 +32,9 @@ embeddings_client = EmbeddingsClient(
     # endpoint=OPENAI_EMBEDDINGS_ENDPOINT
     # model_name='text-embedding-3-small'
     # api_key=OPENAI_API_KEY
-    endpoint=OPENAI_EMBEDDINGS_ENDPOINT,
-    model_name='text-embedding-3-small',
-    api_key=OPENAI_API_KEY,
+    endpoint="http://localhost:11434/v1/embeddings",
+    model_name='nomic-embed-text',
+    api_key="ollama"
 )
 completion_client = ChatCompletionClient(
     #TODO:
@@ -104,7 +104,7 @@ def main():
             user_request=user_request,
             top_k=5,
             score_threshold=0.5,
-            dimensions=385,
+            dimensions=384,
         )
 
 
