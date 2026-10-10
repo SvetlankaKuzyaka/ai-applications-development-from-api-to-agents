@@ -43,6 +43,9 @@ class EmbeddingsClient:
             # - dimensions
             # - model
             # https://developers.openai.com/api/reference/resources/embeddings/methods/create
+            "input": inputs,
+            "dimensions": dimensions,
+            "model": self._model_name,
         }
 
         response = requests.post(url=self._endpoint, headers=headers, json=request_data, timeout=60)
@@ -63,13 +66,15 @@ class EmbeddingsClient:
             #     ],
             #     ...
             #  }
-            response_json = None # TODO: Parse to json (response.json())
-            data = None # TODO: Get `data`
+            response_json = response.json() # TODO: Parse to json (response.json())
+            data = response_json.get("data") # TODO: Get `data`
+            if data is None:
+                raise ValueError("No embeddings data has been present in the response")
             if print_response:
                 print("\n" + "=" * 50 + " RESPONSE " + "=" * 50)
                 print(json.dumps(response_json, indent=2))
                 print("=" * 108)
-            return None # TODO: Return self._from_data(data)
+            return self._from_data(data) # TODO: Return self._from_data(data)
         raise Exception(f"HTTP {response.status_code}: {response.text}")
 
     def _from_data(self, data: list[dict]) -> dict[int, list[float]]:

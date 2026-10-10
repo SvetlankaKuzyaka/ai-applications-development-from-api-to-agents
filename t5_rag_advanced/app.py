@@ -32,12 +32,18 @@ embeddings_client = EmbeddingsClient(
     # endpoint=OPENAI_EMBEDDINGS_ENDPOINT
     # model_name='text-embedding-3-small'
     # api_key=OPENAI_API_KEY
+    endpoint=OPENAI_EMBEDDINGS_ENDPOINT,
+    model_name='text-embedding-3-small',
+    api_key=OPENAI_API_KEY,
 )
 completion_client = ChatCompletionClient(
     #TODO:
     # endpoint=OPENAI_EMBEDDINGS_ENDPOINT
     # model_name='gpt-5.2'
     # api_key=OPENAI_API_KEY
+    endpoint=OPENAI_CHAT_COMPLETIONS_ENDPOINT,
+    model_name='gpt-5.2',
+    api_key=OPENAI_API_KEY,
 )
 
 text_processor = TextProcessor(
@@ -63,6 +69,12 @@ def main():
         #  - file_name: 'embeddings/microwave_manual.txt'
         #  - chunk_size: 150 (or you can experiment, usually we set it as 300)
         #  - overlap: 40 (chars overlap from previous chunk)
+        text_processor.process_text_file(
+            file_name='embeddings/microwave_manual.txt',
+            chunk_size=150,
+            overlap=40,
+            dimensions=384,
+        )
 
         print("="*100)
 
@@ -87,7 +99,13 @@ def main():
         #  - top_k: 5 (limit of searched results in VectorDB), experiment with different numbers
         #  - score_threshold: 0.5 (experiment with different numbers, 0.1 -> 0.99)
         #  - dimensions=384
-        context = None
+        context = text_processor.search(
+            search_mode=SearchMode.COSINE_DISTANCE,
+            user_request=user_request,
+            top_k=5,
+            score_threshold=0.5,
+            dimensions=384,
+        )
 
 
         # Step 2: Augmentation
@@ -99,7 +117,13 @@ def main():
         #           - query=user_request
         #       - assign to `augmented_prompt`
         #  2. Add User message with Augmented content to `conversation`
-        augmented_prompt = None
+        augmented_prompt = USER_PROMPT.format(
+            context="\n\n".join(context),
+            query=user_request,
+        )
+        conversation.add_message(
+            Message(Role.USER, augmented_prompt)
+        )
 
         print(f"Prompt:\n{augmented_prompt}")
 
@@ -109,6 +133,8 @@ def main():
         # TODO:
         #  1. Call `completion_client.get_completion()` with message history from conversation, and assign to `ai_message`
         #  2. Add AI message to `conversation` history
+        ai_message = completion_client.get_completion(conversation.get_messages())
+        conversation.add_message(ai_message)
         print(f"✅ RESPONSE:\n{ai_message.content}")
         print("=" * 100)
 
