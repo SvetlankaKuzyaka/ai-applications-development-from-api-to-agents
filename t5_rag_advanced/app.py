@@ -104,7 +104,7 @@ def main():
             user_request=user_request,
             top_k=5,
             score_threshold=0.5,
-            dimensions=384,
+            dimensions=385,
         )
 
 
