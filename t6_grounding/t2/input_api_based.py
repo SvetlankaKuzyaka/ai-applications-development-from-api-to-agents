@@ -4,7 +4,7 @@ from typing import Any
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from commons.constants import OPENAI_API_KEY
+from commons.constants import OPENAI_API_KEY, OPENAI_CHAT_COMPLETIONS_ENDPOINT
 from t6_grounding.user_service_client import UserServiceClient
 
 #TODO:
@@ -23,7 +23,26 @@ from t6_grounding.user_service_client import UserServiceClient
 #   - "Look for john@example.com" → email: "john@example.com"
 #   - "Find John Smith" → name: "John", surname: "Smith"
 #   - Ambiguous query (e.g. "find users that love hiking") → no clear parameters (return empty list)
-QUERY_ANALYSIS_PROMPT = ""
+QUERY_ANALYSIS_PROMPT = """You are a query analysis system that extracts search parameters from user questions.
+
+Available Search Fields:
+- name: a user's first name, for example "John"
+- surname: a user's surname, for example "Smith"
+- email: a user's email address, for example "john@example.com"
+
+Instructions:
+1. Analyze the user's question and identify what they are looking for.
+2. Extract specific search values mentioned in the query.
+3. Map them to the appropriate search fields.
+4. If multiple criteria are mentioned, include all of them.
+5. Only extract explicit values; do not infer values that were not mentioned.
+
+Examples:
+- "Who is John?" → name: "John"
+- "Find users with surname Smith" → surname: "Smith"
+- "Look for john@example.com" → email: "john@example.com"
+- "Find John Smith" → name: "John", surname: "Smith"
+- "Find users that love hiking" → no clear parameters; return an empty list."""
 
 #TODO:
 # Define SYSTEM_PROMPT for the final answer generation (RAG assistant):
@@ -37,14 +56,24 @@ QUERY_ANALYSIS_PROMPT = ""
 #   - Answer ONLY based on conversation history and RAG context
 #   - If no relevant info exists, state that you cannot answer
 #   - Be conversational and helpful; format user information clearly
-SYSTEM_PROMPT = ""
+SYSTEM_PROMPT = """You are a RAG-powered assistant for user information questions.
+
+The user message contains:
+- RAG CONTEXT: retrieved documents relevant to the query.
+- USER QUESTION: the user's actual question.
+
+Use RAG CONTEXT as context when answering USER QUESTION. Cite specific sources from the context. Answer only based on the conversation history and RAG context. If no relevant information exists, state that you cannot answer. Be conversational and helpful, and format user information clearly."""
 
 #TODO:
 # Define USER_PROMPT template with two placeholders:
 # - {context} — the formatted retrieved user data
 # - {query}   — the user's question
 # Use markdown-style section headers (## RAG CONTEXT and ## USER QUESTION)
-USER_PROMPT = ""
+USER_PROMPT = """## RAG CONTEXT
+{context}
+
+## USER QUESTION
+{query}"""
 
 
 #TODO:
@@ -53,7 +82,9 @@ USER_PROMPT = ""
 # - SURNAME = "surname"
 # - EMAIL = "email"
 class SearchField(StrEnum):
-    pass
+    NAME = "name"
+    SURNAME = "surname"
+    EMAIL = "email"
 
 
 #TODO:
@@ -61,7 +92,8 @@ class SearchField(StrEnum):
 # - search_field: SearchField — with description "Search field"
 # - search_value: str — with description "Search value. Sample: Adam."
 class SearchRequest(BaseModel):
-    pass
+    search_field: SearchField = Field(description="Search field")
+    search_value: str = Field(description="Search value. Sample: Adam.")
 
 
 #TODO:
@@ -69,10 +101,21 @@ class SearchRequest(BaseModel):
 # - search_request_parameters: list[SearchRequest]
 #   with description "List of search parameters to execute" and default_factory=list
 class SearchRequests(BaseModel):
-    pass
+    search_request_parameters: list[SearchRequest] = Field(
+        default_factory=list,
+        description="List of search parameters to execute",
+    )
 
 
-llm_client = OpenAI(api_key=OPENAI_API_KEY)
+chat_url, chat_query = OPENAI_CHAT_COMPLETIONS_ENDPOINT.split("?", 1)
+llm_client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    base_url=chat_url.removesuffix("/chat/completions"),
+    default_query=dict(
+        parameter.split("=", 1)
+        for parameter in chat_query.split("&")
+    ),
+)
 
 user_client = UserServiceClient()
 
@@ -96,7 +139,27 @@ def retrieve_context(user_question: str) -> list[dict[str, Any]]:
     # 5. Otherwise:
     #   - Print "No specific search parameters found!"
     #   - Return []
-    raise NotImplementedError
+    messages = [
+        {"role": "system", "content": QUERY_ANALYSIS_PROMPT},
+        {"role": "user", "content": user_question},
+    ]
+    response = llm_client.beta.chat.completions.parse(
+        model="gpt-4.1-nano",
+        temperature=0.0,
+        messages=messages,
+        response_format=SearchRequests,
+    )
+    search_requests = response.choices[0].message.parsed
+    if search_requests.search_request_parameters:
+        requests_dict = {
+            search_request.search_field.value: search_request.search_value
+            for search_request in search_requests.search_request_parameters
+        }
+        print(f"Searching with parameters: {requests_dict}")
+        return user_client.search_users(**requests_dict)
+
+    print("No specific search parameters found!")
+    return []
 
 
 def augment_prompt(user_question: str, context: list[dict[str, Any]]) -> str:
@@ -107,7 +170,15 @@ def augment_prompt(user_question: str, context: list[dict[str, Any]]) -> str:
     # 2. Format USER_PROMPT with context=context_str and query=user_question
     # 3. Print the augmented prompt
     # 4. Return the augmented prompt
-    raise NotImplementedError
+    context_str = ""
+    for user in context:
+        context_str += "User:\n"
+        for key, value in user.items():
+            context_str += f"  {key}: {value}\n"
+        context_str += "\n"
+    augmented_prompt = USER_PROMPT.format(context=context_str, query=user_question)
+    print(augmented_prompt)
+    return augmented_prompt
 
 
 def generate_answer(augmented_prompt: str) -> str:
@@ -121,7 +192,16 @@ def generate_answer(augmented_prompt: str) -> str:
     #   - temperature=0.0
     #   - messages=messages
     # 3. Return response.choices[0].message.content (default to "")
-    raise NotImplementedError
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": augmented_prompt},
+    ]
+    response = llm_client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0.0,
+        messages=messages,
+    )
+    return response.choices[0].message.content or ""
 
 
 def main():
@@ -147,7 +227,26 @@ def main():
     #       - Print f"\nAnswer: {answer}\n"
     #     2.2.5. Otherwise:
     #       - Print "\n--- No relevant information found ---"
-    raise NotImplementedError
+    print("Query samples:")
+    print(" - I need user emails that filled with hiking and psychology")
+    print(" - Who is John?")
+    print(" - Find users with surname Adams")
+    print(" - Do we have smbd with name John that love painting?")
+    while True:
+        user_question = input("> ").strip()
+        if user_question:
+            if user_question.lower() in ("quit", "exit"):
+                break
+            print("\n--- Retrieving context ---")
+            context = retrieve_context(user_question)
+            if context:
+                print("\n--- Augmenting prompt ---")
+                augmented_prompt = augment_prompt(user_question, context)
+                print("\n--- Generating answer ---")
+                answer = generate_answer(augmented_prompt)
+                print(f"\nAnswer: {answer}\n")
+            else:
+                print("\n--- No relevant information found ---")
 
 
 if __name__ == "__main__":

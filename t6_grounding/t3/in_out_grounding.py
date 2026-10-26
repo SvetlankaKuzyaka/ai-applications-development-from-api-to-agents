@@ -7,7 +7,11 @@ from langchain_openai import OpenAIEmbeddings
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from commons.constants import OPENAI_API_KEY
+from commons.constants import (
+    OPENAI_API_KEY,
+    OPENAI_CHAT_COMPLETIONS_ENDPOINT,
+    OPENAI_EMBEDDINGS_ENDPOINT,
+)
 from t6_grounding.user_service_client import UserServiceClient
 
 """
@@ -28,17 +32,35 @@ from t6_grounding.user_service_client import UserServiceClient
 #   Step 2: Vector store search finds the most relevant users
 #   Step 3: Model receives CONTEXT (most relevant users with ID and info) + USER QUESTION
 #   Step 4: Model groups users by hobby and returns response according to Response Format
-SYSTEM_PROMPT = ""
+SYSTEM_PROMPT = """You are a RAG-powered assistant that groups users by their hobbies.
+
+Flow:
+1. The user asks to search for users by hobbies.
+2. A vector store search finds the most relevant users.
+3. You receive CONTEXT containing the most relevant users with their IDs and information, together with the USER QUESTION.
+4. Group matching users by hobby and return the response according to the Response Format."""
 
 #TODO:
 # Define USER_PROMPT template with two placeholders:
 # - {context} — the formatted retrieved user data
 # - {query}   — the user's question
 # Use markdown-style section headers (## CONTEXT and ## USER QUESTION)
-USER_PROMPT = ""
+USER_PROMPT = """## CONTEXT
+{context}
+
+## USER QUESTION
+{query}"""
 
 
-llm_client = OpenAI(api_key=OPENAI_API_KEY)
+chat_url, chat_query = OPENAI_CHAT_COMPLETIONS_ENDPOINT.split("?", 1)
+llm_client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    base_url=chat_url.removesuffix("/chat/completions"),
+    default_query=dict(
+        parameter.split("=", 1)
+        for parameter in chat_query.split("&")
+    ),
+)
 
 
 #TODO:
@@ -46,21 +68,28 @@ llm_client = OpenAI(api_key=OPENAI_API_KEY)
 # - hobby: str — with description "Hobby. Example: football, painting, horsing, photography, bird watching..."
 # - user_ids: list[int] — with description "List of user IDs that have hobby requested by user."
 class GroupingResult(BaseModel):
-    pass
+    hobby: str = Field(
+        description="Hobby. Example: football, painting, horsing, photography, bird watching..."
+    )
+    user_ids: list[int] = Field(
+        description="List of user IDs that have hobby requested by user."
+    )
 
 
 #TODO:
 # Define GroupingResults as a Pydantic BaseModel with one field:
 # - grouping_results: list[GroupingResult] — with description "List matching search results."
 class GroupingResults(BaseModel):
-    pass
+    grouping_results: list[GroupingResult] = Field(
+        description="List matching search results."
+    )
 
 
 def format_user_document(user: dict[str, Any]) -> str:
     #TODO:
     # Return a formatted string for a single user, including only id and about_me:
     # f"User:\n id: {user.get('id')},\nAbout user: {user.get('about_me')}\n"
-    raise NotImplementedError
+    return f"User:\n id: {user.get('id')},\nAbout user: {user.get('about_me')}\n"
 
 
 class InputGrounder:
@@ -71,13 +100,17 @@ class InputGrounder:
         # - self.embeddings = embeddings
         # - self.user_client = UserServiceClient()
         # - self.vectorstore = None
-        raise NotImplementedError
+        self.llm_client = llm_client
+        self.embeddings = embeddings
+        self.user_client = UserServiceClient()
+        self.vectorstore = None
 
     async def __aenter__(self):
         #TODO:
         # 1. Call await self.initialize_vectorstore()
         # 2. Return self
-        raise NotImplementedError
+        await self.initialize_vectorstore()
+        return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         pass
@@ -95,7 +128,30 @@ class InputGrounder:
         # 7. Create a list of self.vectorstore.aadd_documents(batch) coroutines for each batch
         # 8. Run all coroutines in parallel with asyncio.gather(*tasks)
         # 9. Print "Setup FINISHED"
-        raise NotImplementedError
+        print("🔍 Loading all users for initial vectorstore...")
+        users = self.user_client.get_all_users()
+        documents = [
+            Document(
+                id=user.get("id"),
+                page_content=format_user_document(user),
+            )
+            for user in users
+        ]
+        document_batches = [
+            documents[i:i + batch_size]
+            for i in range(0, len(documents), batch_size)
+        ]
+        print("Setup vectorstore...")
+        self.vectorstore = Chroma(
+            collection_name="users",
+            embedding_function=self.embeddings,
+        )
+        tasks = [
+            self.vectorstore.aadd_documents(batch)
+            for batch in document_batches
+        ]
+        await asyncio.gather(*tasks)
+        print("Setup FINISHED")
 
     async def _update_vectorstore(self):
         #TODO:
@@ -112,7 +168,42 @@ class InputGrounder:
         # 10. If new_documents:
         #    - If len > 50: split into batches and run aadd_documents in parallel
         #    - Otherwise: await self.vectorstore.aadd_documents(new_documents)
-        raise NotImplementedError
+        users = self.user_client.get_all_users()
+        vectorstore_data = self.vectorstore.get()
+        vectorstore_ids_set = {
+            str(vectorstore_id)
+            for vectorstore_id in vectorstore_data["ids"]
+        }
+        users_dict = {
+            str(user.get("id")): user
+            for user in users
+        }
+        users_ids_set = set(users_dict.keys())
+        new_user_ids = users_ids_set - vectorstore_ids_set
+        ids_to_delete = vectorstore_ids_set - users_ids_set
+        new_documents = [
+            Document(
+                id=user_id,
+                page_content=format_user_document(users_dict[user_id]),
+            )
+            for user_id in new_user_ids
+        ]
+
+        if ids_to_delete:
+            self.vectorstore.delete(list(ids_to_delete))
+        if new_documents:
+            if len(new_documents) > 50:
+                document_batches = [
+                    new_documents[i:i + 50]
+                    for i in range(0, len(new_documents), 50)
+                ]
+                tasks = [
+                    self.vectorstore.aadd_documents(batch)
+                    for batch in document_batches
+                ]
+                await asyncio.gather(*tasks)
+            else:
+                await self.vectorstore.aadd_documents(new_documents)
 
     async def retrieve_context(self, query: str, k: int = 100, score: float = 0.2) -> str:
         """Retrieve context, with optional automatic vectorstore update."""
@@ -127,12 +218,27 @@ class InputGrounder:
         #       - Print f"Retrieved (Score: {relevance_score:.3f}): {doc.page_content}"
         # 5. Print f"{'=' * 100}\n"
         # 6. Return "\n\n".join(context_parts)
-        raise NotImplementedError
+        if self.vectorstore is None:
+            await self.initialize_vectorstore()
+        else:
+            await self._update_vectorstore()
+        print("Retrieving context...")
+        relevant_docs = self.vectorstore.similarity_search_with_relevance_scores(
+            query,
+            k=k,
+            score_threshold=score,
+        )
+        context_parts = []
+        for doc, relevance_score in relevant_docs:
+            context_parts.append(doc.page_content)
+            print(f"Retrieved (Score: {relevance_score:.3f}): {doc.page_content}")
+        print(f"{'=' * 100}\n")
+        return "\n\n".join(context_parts)
 
     def augment_prompt(self, query: str, context: str) -> str:
         #TODO:
         # Format and return USER_PROMPT with context=context and query=query
-        raise NotImplementedError
+        return USER_PROMPT.format(context=context, query=query)
 
     def generate_answer(self, augmented_prompt: str) -> GroupingResults:
         #TODO:
@@ -145,14 +251,24 @@ class InputGrounder:
         #   - messages=messages
         #   - response_format=GroupingResults
         # 3. Return response.choices[0].message.parsed
-        raise NotImplementedError
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": augmented_prompt},
+        ]
+        response = self.llm_client.beta.chat.completions.parse(
+            model="gpt-4.1-nano",
+            temperature=0.0,
+            messages=messages,
+            response_format=GroupingResults,
+        )
+        return response.choices[0].message.parsed
 
 
 class OutputGrounder:
     def __init__(self):
         #TODO:
         # Store self.user_client = UserServiceClient()
-        raise NotImplementedError
+        self.user_client = UserServiceClient()
 
     async def ground_response(self, grouping_results: GroupingResults):
         #TODO:
@@ -162,7 +278,11 @@ class OutputGrounder:
         #   - Fetch users: await self._find_users(grouping_result.user_ids)
         #   - Print f"Users: {users}"
         #   - Print "----------"
-        raise NotImplementedError
+        for grouping_result in grouping_results.grouping_results:
+            print(f"Hobby: {grouping_result.hobby}")
+            users = await self._find_users(grouping_result.user_ids)
+            print(f"Users: {users}")
+            print("----------")
 
     async def _find_users(self, ids: list[int]) -> list[dict[str, Any]]:
         #TODO:
@@ -174,7 +294,18 @@ class OutputGrounder:
         # 2. Build tasks list: [safe_get_user(user_id) for user_id in ids]
         # 3. Run all tasks in parallel with asyncio.gather(*tasks)
         # 4. Return only non-None results from users_results
-        raise NotImplementedError
+        async def safe_get_user(user_id: int) -> Optional[dict[str, Any]]:
+            try:
+                return await self.user_client.get_user(user_id)
+            except Exception as e:
+                if "404" in str(e):
+                    print(f"User with ID {user_id} not found")
+                    return None
+                raise
+
+        tasks = [safe_get_user(user_id) for user_id in ids]
+        users_results = await asyncio.gather(*tasks)
+        return [user for user in users_results if user is not None]
 
 
 async def main():
@@ -197,7 +328,31 @@ async def main():
     #     3.2.4. Call rag.augment_prompt(user_question, context) → augmented_prompt
     #     3.2.5. Call rag.generate_answer(augmented_prompt) → grouping_results
     #     3.2.6. Call await output_grounder.ground_response(grouping_results)
-    raise NotImplementedError
+    embeddings_url, embeddings_query = OPENAI_EMBEDDINGS_ENDPOINT.split("?", 1)
+    embeddings = OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        api_key=OPENAI_API_KEY,
+        dimensions=384,
+        base_url=embeddings_url.removesuffix("/embeddings"),
+        default_query=dict(
+            parameter.split("=", 1)
+            for parameter in embeddings_query.split("&")
+        ),
+    )
+    output_grounder = OutputGrounder()
+    async with InputGrounder(embeddings, llm_client) as rag:
+        print("Query samples:")
+        print(" - I need people who love to go to mountains")
+        print(" - Find people who love to watch stars and night sky")
+        print(" - I need people to go to fishing together")
+        while True:
+            user_question = input("> ").strip()
+            if user_question.lower() in ("quit", "exit"):
+                break
+            context = await rag.retrieve_context(user_question)
+            augmented_prompt = rag.augment_prompt(user_question, context)
+            grouping_results = rag.generate_answer(augmented_prompt)
+            await output_grounder.ground_response(grouping_results)
 
 
 if __name__ == "__main__":

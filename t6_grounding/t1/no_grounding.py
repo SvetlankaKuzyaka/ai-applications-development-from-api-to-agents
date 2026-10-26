@@ -3,7 +3,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from commons.constants import OPENAI_API_KEY
+from commons.constants import OPENAI_API_KEY, OPENAI_CHAT_COMPLETIONS_ENDPOINT
 from t6_grounding.user_service_client import UserServiceClient
 
 #TODO:
@@ -19,7 +19,18 @@ from t6_grounding.user_service_client import UserServiceClient
 #   - Matching users: return their full details as provided
 #   - No matches: respond with exactly "NO_MATCHES_FOUND"
 #   - Uncertain: include the user with a note about why they might match
-BATCH_SYSTEM_PROMPT = ""
+BATCH_SYSTEM_PROMPT = """You are a user search assistant. Find users from the provided list that match the search criteria.
+
+Instructions:
+1. Analyze the user question to understand what attributes are being searched for.
+2. Examine each user in the context and determine if they match.
+3. For matching users, return their complete information.
+4. Be inclusive — if a user partially matches, include them.
+
+Output format:
+- For matching users, return their full details exactly as provided.
+- If there are no matches, respond with exactly "NO_MATCHES_FOUND".
+- If uncertain, include the user with a note about why they might match."""
 
 #TODO:
 # Define FINAL_SYSTEM_PROMPT for the second LLM pass (result compilation):
@@ -30,14 +41,25 @@ BATCH_SYSTEM_PROMPT = ""
 #   3. Present information in a clear, organized manner
 #   4. If multiple users match, group them logically
 #   5. If no users match, explain what was searched and suggest alternatives
-FINAL_SYSTEM_PROMPT = ""
+FINAL_SYSTEM_PROMPT = """You are a helpful assistant that answers based on user search results.
+
+Instructions:
+1. Review all search results from different batches.
+2. Combine and deduplicate matching users found across batches.
+3. Present information in a clear, organized manner.
+4. If multiple users match, group them logically.
+5. If no users match, explain what was searched and suggest alternatives."""
 
 #TODO:
 # Define USER_PROMPT template with two placeholders:
 # - {context} — the formatted user data
 # - {query}   — the search query
 # Use markdown-style section headers to separate the two parts
-USER_PROMPT = ""
+USER_PROMPT = """## CONTEXT
+{context}
+
+## USER QUESTION
+{query}"""
 
 
 class TokenTracker:
@@ -46,13 +68,15 @@ class TokenTracker:
         # Initialize two instance variables:
         # - total_tokens: int, starts at 0
         # - batch_tokens: list, starts empty
-        raise NotImplementedError
+        self.total_tokens: int = 0
+        self.batch_tokens: list[int] = []
 
     def add_tokens(self, tokens: int):
         #TODO:
         # 1. Add tokens to total_tokens
         # 2. Append tokens to batch_tokens list
-        raise NotImplementedError
+        self.total_tokens += tokens
+        self.batch_tokens.append(tokens)
 
     def get_summary(self):
         #TODO:
@@ -60,10 +84,22 @@ class TokenTracker:
         # - 'total_tokens': self.total_tokens
         # - 'batch_count': number of batches processed
         # - 'batch_tokens': list of per-batch token counts
-        raise NotImplementedError
+        return {
+            "total_tokens": self.total_tokens,
+            "batch_count": len(self.batch_tokens),
+            "batch_tokens": self.batch_tokens,
+        }
 
 
-llm_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+chat_url, chat_query = OPENAI_CHAT_COMPLETIONS_ENDPOINT.split("?", 1)
+llm_client = AsyncOpenAI(
+    api_key=OPENAI_API_KEY,
+    base_url=chat_url.removesuffix("/chat/completions"),
+    default_query=dict(
+        parameter.split("=", 1)
+        for parameter in chat_query.split("&")
+    ),
+)
 
 token_tracker = TokenTracker()
 
@@ -75,7 +111,13 @@ def join_context(context: list[dict[str, Any]]) -> str:
     #   - Append "User:\n"
     #   - For each key-value pair in the user dict: append f"  {key}: {value}\n"
     #   - Append "\n" after each user to separate entries
-    raise NotImplementedError
+    context_str = ""
+    for user in context:
+        context_str += "User:\n"
+        for key, value in user.items():
+            context_str += f"  {key}: {value}\n"
+        context_str += "\n"
+    return context_str
 
 
 async def generate_response(system_prompt: str, user_message: str) -> str:
@@ -93,7 +135,21 @@ async def generate_response(system_prompt: str, user_message: str) -> str:
     # 6. Extract content from response.choices[0].message.content (default to "")
     # 7. Print f"Response: \n {content}\nTokens used: {total_tokens}\n"
     # 8. Return content
-    raise NotImplementedError
+    print("Processing...")
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+    response = await llm_client.chat.completions.create(
+        model="gpt-4.1-nano",
+        temperature=0.0,
+        messages=messages,
+    )
+    total_tokens = response.usage.total_tokens if response.usage else 0
+    token_tracker.add_tokens(total_tokens)
+    content = response.choices[0].message.content or ""
+    print(f"Response: \n {content}\nTokens used: {total_tokens}\n")
+    return content
 
 
 async def main():
@@ -127,7 +183,48 @@ async def main():
     #        - "\n=== Performance ==="
     #        - f"Total API calls: {summary['batch_count']}"
     #        - f"Total tokens: {summary['total_tokens']}"
-    raise NotImplementedError
+    print("Query samples:")
+    print(" - Do we have someone with name John that loves traveling?")
+    user_question = input("> ").strip()
+    if user_question:
+        print("\n--- Searching user database ---")
+        users = UserServiceClient().get_all_users()
+        user_batches = [users[i:i + 100] for i in range(0, len(users), 100)]
+        tasks = [
+            generate_response(
+                system_prompt=BATCH_SYSTEM_PROMPT,
+                user_message=USER_PROMPT.format(
+                    context=join_context(user_batch),
+                    query=user_question,
+                ),
+            )
+            for user_batch in user_batches
+        ]
+        batch_results = await asyncio.gather(*tasks)
+
+        print("\n--- Compiling results ---")
+        relevant_results = [
+            result for result in batch_results
+            if result.strip() != "NO_MATCHES_FOUND"
+        ]
+        print("\n=== SEARCH RESULTS ===")
+        if relevant_results:
+            combined_results = "\n\n".join(relevant_results)
+            await generate_response(
+                FINAL_SYSTEM_PROMPT,
+                USER_PROMPT.format(
+                    context=combined_results,
+                    query=user_question,
+                ),
+            )
+        else:
+            print(f"No users found matching '{user_question}'")
+            print("Try refining your search or using different keywords.")
+
+        summary = token_tracker.get_summary()
+        print("\n=== Performance ===")
+        print(f"Total API calls: {summary['batch_count']}")
+        print(f"Total tokens: {summary['total_tokens']}")
 
 
 if __name__ == "__main__":
